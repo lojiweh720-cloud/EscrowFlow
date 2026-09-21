@@ -1,1 +1,313 @@
-streamlit>=1.36,<2
+import os
+import re
+import sqlite3
+import uuid
+from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
+
+import streamlit as st
+import streamlit.components.v1 as components
+
+
+APP_TITLE = "EscrowFlow Web3 Gateway"
+PLATFORM_WALLET = os.getenv(
+    "PLATFORM_WALLET",
+    "9n43d6JU2xxyHJbAFeJmevcBoxvuiGgTatDB5JJgeNDX",
+)
+PLATFORM_FEE_PCT = Decimal("0.01")
+LOCKED_STATUS = "Locked in Escrow 🔒"
+RELEASED_STATUS = "Released to Vendor ✅"
+DB_PATH = Path(os.getenv("ESCROW_DB_PATH", "escrowflow.db"))
+
+st.set_page_config(page_title=APP_TITLE, page_icon="💸", layout="wide")
+
+
+def money(value: Decimal) -> Decimal:
+    return value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+
+def calculate_fees(amount: Decimal) -> tuple[Decimal, Decimal]:
+    fee = money(amount * PLATFORM_FEE_PCT)
+    net = money(amount - fee)
+    return fee, net
+
+
+def is_valid_solana_address(address: str) -> bool:
+    cleaned = (address or "").strip()
+    if not cleaned:
+        return False
+    if not 32 <= len(cleaned) <= 44:
+        return False
+    return re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]+", cleaned) is not None
+
+
+def get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    with get_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS escrows (
+                tx_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                buyer_wallet TEXT,
+                receiver TEXT NOT NULL,
+                gross_amount TEXT NOT NULL,
+                platform_fee TEXT NOT NULL,
+                net_amount TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                released_at TEXT
+            )
+            """
+        )
+
+
+def create_escrow(title, buyer_wallet, receiver, gross, fee, net):
+    tx_id = f"TX-{uuid.uuid4().hex[:10].upper()}"
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO escrows (
+                tx_id, title, buyer_wallet, receiver, gross_amount, platform_fee, net_amount, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            """,
+            (
+                tx_id,
+                title,
+                buyer_wallet,
+                receiver,
+                str(gross),
+                str(fee),
+                str(net),
+                LOCKED_STATUS,
+            ),
+        )
+    return tx_id
+
+
+def get_escrow(tx_id):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM escrows WHERE tx_id = ?",
+            (tx_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_escrows():
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM escrows ORDER BY created_at DESC"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def release_escrow(tx_id):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE escrows
+            SET status = ?, released_at = datetime('now')
+            WHERE tx_id = ? AND status = ?
+            """,
+            (RELEASED_STATUS, tx_id, LOCKED_STATUS),
+        )
+
+
+def get_total_released_fees() -> Decimal:
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(CAST(platform_fee AS REAL)), 0) AS total
+            FROM escrows
+            WHERE status = ?
+            """,
+            (RELEASED_STATUS,),
+        ).fetchone()
+    if row and row["total"] is not None:
+        return money(Decimal(str(row["total"])))
+    return Decimal("0.0000")
+
+
+init_db()
+
+st.title("💸 EscrowFlow: Web3 Cross-Border P2P Gateway")
+st.subheader("Secure, instant Solana-powered digital payments for African solopreneurs")
+st.caption("Demo mode: local SQLite persistence only. No real funds move on-chain.")
+
+with st.sidebar:
+    st.header("🔑 Active Platform Rules")
+    st.write("**Treasury Destination**")
+    st.code(PLATFORM_WALLET)
+    st.write(f"**Platform Fee:** {PLATFORM_FEE_PCT * 100}% per cleared transaction")
+    st.caption("For production, put the wallet in Streamlit secrets or environment variables.")
+
+st.write("### 🌐 Phantom Wallet Connection")
+phantom_button_html = f"""
+<div style="text-align:center; margin-top:10px;">
+    <button id="connect_btn" style="
+        background-color:#512da8;
+        color:white;
+        padding:12px 24px;
+        border:none;
+        border-radius:8px;
+        font-size:16px;
+        font-weight:bold;
+        cursor:pointer;
+        width:100%;
+    ">
+        ⚡ Connect Phantom Wallet
+    </button>
+    <p id="wallet_status" style="color:#888; font-family:sans-serif; margin-top:10px; font-size:14px;">
+        Status: Disconnected
+    </p>
+    <small style="color:#777;">Treasury: {PLATFORM_WALLET[:6]}...</small>
+</div>
+
+<script>
+const button = document.getElementById('connect_btn');
+const statusText = document.getElementById('wallet_status');
+
+button.addEventListener('click', async () => {{
+    const provider = window.solana;
+    if (!provider || !provider.isPhantom) {{
+        statusText.style.color = '#FF1744';
+        statusText.innerText = '❌ Phantom not found. Install the extension and retry.';
+        window.open('https://phantom.app', '_blank');
+        return;
+    }}
+
+    try {{
+        statusText.innerText = 'Connecting...';
+        const response = await provider.connect();
+        const publicKey = response.publicKey.toString();
+        statusText.style.color = '#00A86B';
+        statusText.innerText = '✅ Connected Wallet: ' + publicKey.slice(0, 6) + '...' + publicKey.slice(-4);
+        button.innerText = 'Wallet Linked';
+        button.style.backgroundColor = '#00A86B';
+    }} catch (error) {{
+        statusText.style.color = '#FF1744';
+        statusText.innerText = '❌ Connection rejected by the user.';
+    }}
+}});
+</script>
+"""
+components.html(phantom_button_html, height=180)
+
+st.write("")
+manual_wallet = st.text_input(
+    "Connected wallet address (manual demo field)",
+    value="",
+    placeholder="Optional: enter a Solana wallet address for simulation",
+)
+if manual_wallet:
+    st.caption(f"Wallet captured for demo flow: `{manual_wallet.strip()}`")
+
+# Tabs
+create_tab, release_tab, ledger_tab = st.tabs(
+    ["🆕 Create Escrow Payment", "🔐 Manage & Release Funds", "📊 Platform Earnings Ledger"]
+)
+
+with create_tab:
+    st.header("Create a Secure Escrow Contract")
+
+    with st.form("create_escrow_form", clear_on_submit=False):
+        project_title = st.text_input(
+            "Project Name / Course Title",
+            placeholder="e.g., Financial Coaching Course",
+        )
+        amount_usdc = st.number_input(
+            "Amount (USDC / Digital Dollars)",
+            min_value=1.0,
+            step=0.5,
+            format="%.4f",
+        )
+        buyer_wallet = st.text_input(
+            "Buyer Wallet Address (optional)",
+            placeholder="e.g., 7mA...9xYQ",
+        ).strip()
+        vendor_addr = st.text_input(
+            "Vendor Solana Wallet Address (Receiver)",
+            placeholder="e.g., 4jZq...82wn",
+        ).strip()
+
+        submit_btn = st.form_submit_button("Initiate Escrow Deposit")
+
+        if submit_btn:
+            errors = []
+            if not project_title.strip():
+                errors.append("Please provide a project title.")
+            if amount_usdc <= 0:
+                errors.append("Amount must be greater than zero.")
+            if not is_valid_solana_address(vendor_addr):
+                errors.append("Please provide a valid Solana wallet address for the vendor.")
+            if buyer_wallet and not is_valid_solana_address(buyer_wallet):
+                errors.append("Buyer wallet address is invalid.")
+
+            if errors:
+                for error in errors:
+                    st.error(f"❌ {error}")
+            else:
+                gross = Decimal(str(amount_usdc))
+                fee, net = calculate_fees(gross)
+                tx_id = create_escrow(
+                    title=project_title.strip(),
+                    buyer_wallet=buyer_wallet or "",
+                    receiver=vendor_addr,
+                    gross=money(gross),
+                    fee=fee,
+                    net=net,
+                )
+                st.success(f"🎉 Escrow initialized! Transaction ID: **{tx_id}**")
+                st.info(
+                    "For real-world use, verify the deposit on-chain before allowing a release flow."
+                )
+
+with release_tab:
+    st.header("Release Escrowed Funds")
+
+    tx_to_release = st.text_input(
+        "Enter Escrow Transaction ID to clear",
+        placeholder="e.g., TX-A1B2C3D4E5",
+    ).strip().upper()
+
+    if tx_to_release:
+        tx = get_escrow(tx_to_release)
+        if tx is None:
+            st.error("❌ Transaction code invalid.")
+        else:
+            st.write(f"**Project:** {tx['title']}")
+            st.write(f"**Buyer Wallet:** `{tx['buyer_wallet'] or 'N/A'}`")
+            st.write(f"**Vendor Wallet:** `{tx['receiver']}`")
+            st.write(f"**Payout:** `{tx['net_amount']} USDC`")
+            st.write(f"**Status:** {tx['status']}")
+
+            if tx["status"] == LOCKED_STATUS:
+                st.warning(
+                    "This demo only updates the internal database. Real payouts need verified blockchain confirmation."
+                )
+                if st.button("Confirm & Disburse Funds 🚀", key=f"release_{tx_to_release}"):
+                    release_escrow(tx_to_release)
+                    st.success("✅ Escrow marked as released in the demo ledger.")
+            else:
+                st.success("This escrow has already been released.")
+
+with ledger_tab:
+    st.header("📈 Platform Earnings Ledger")
+    total_fees = get_total_released_fees()
+    st.metric("Accumulated Profits (USDC)", f"{total_fees} USDC")
+
+    records = list_escrows()
+    if records:
+        st.write("### Escrow Database State")
+        st.dataframe(records, use_container_width=True, hide_index=True)
+    else:
+        st.info("No escrow transactions have been created yet.")
+
+st.markdown("---")
+st.caption("EscrowFlow Demo • Built for Streamlit Community Cloud")

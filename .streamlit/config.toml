@@ -1,11 +1,55 @@
-[server]
-headless = true
-enableCORS = false
-enableXsrfProtection = true
+# EscrowFlow
 
-[theme]
-base = "light"
-primaryColor = "#512da8"
+A polished Streamlit demo for a Solana-inspired escrow workflow for cross-border digital payments.
 
-[browser]
-gatherUsageStats = false
+## Features
+
+- Secure escrow contract creator
+- Wallet address validation
+- Transaction ID generation
+- Fee and net payout calculation
+- Release flow for vendors
+- Earnings ledger dashboard
+- SQLite-backed persistence for demo use
+- Phantom wallet UX mockup for browser front-end experience
+
+## Local development
+
+```bash
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## Deploy on Streamlit Community Cloud
+
+1. Push this repo to GitHub.
+2. Open [Streamlit Community Cloud](https://share.streamlit.io/).
+3. Connect the repository `lojiweh720-cloud/EscrowFlow`.
+4. Set the branch to `main`.
+5. Set the main file to `app.py`.
+6. Deploy.
+7. In your app settings, add a secret:
+
+```toml
+PLATFORM_WALLET = "your_real_treasury_wallet_address"
+```
+
+## Notes
+
+- This project is designed as a demo and does not send real funds.
+- A real production version requires:
+  - Solana RPC integration
+  - on-chain escrow verification
+  - secure wallet signing via a trusted front-end bridge
+  - server-side authorization and audit logging
+  - a durable database (e.g. PostgreSQL)
+
+## Recommended production stack
+
+- Streamlit or FastAPI frontend
+- PostgreSQL for escrow records
+- Solana RPC and anchor-based or custom on-chain escrow program
+- Phantom wallet integration with transaction signing
+- JWT/session auth for admin and user roles
